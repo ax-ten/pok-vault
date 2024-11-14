@@ -7,7 +7,6 @@ from auction import AuctionDB, Valuta
 from functools import wraps
 from telegram import Update
 from telegram.ext import ContextTypes
-from ptbcontrib.username_to_chat_api import UsernameToChatAPI
 
 
 def authorized_only(func):
@@ -87,18 +86,23 @@ async def finalize_auction(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> 
     """Crea le aste nel database e invia il messaggio di asta nel gruppo."""
     card_names = user_state[user_id]["card_names"]
     
-    message_text = f"#Asta iniziata! Scegli una carta per fare un'offerta:\n"
+    message_text = "#Asta iniziata! Scegli una carta per fare un'offerta:\n"
     keyboard = []
-
     for i, card_name in enumerate(card_names):
         message_text += f"{EMOJIS[i]} → {card_name}: 0\n"
         keyboard.append(InlineKeyboardButton(f'{EMOJIS[i]}', callback_data=f"offer_{card_name}"))
-        AuctionDB.add_active_auction(card_name) 
     
     photo = user_state[user_id]["photo"]
     reply_markup = InlineKeyboardMarkup([keyboard])
-    await context.bot.send_photo(chat_id=GROUP_ID, photo=photo, caption=message_text, reply_markup=reply_markup)
-
+    message = await context.bot.send_photo(
+        chat_id=GROUP_ID, 
+        photo=photo, 
+        caption=message_text, 
+        reply_markup=reply_markup)
+    
+    for card_name in card_names:
+        AuctionDB.add_active_auction(card_name, message_id=message.message_id)
+    
     # Cancella lo stato temporaneo dell'utente
     del user_state[user_id]
 
@@ -119,9 +123,8 @@ async def handle_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     balance = AuctionDB.get_user_balance(user.id)
     if balance is None:
-        await query.answer("Partecipa alle attività per avere un portafogli!.")
-        return
-    elif balance < new_offer:
+        AuctionDB.add_to_wallet(user.id, 0)
+    if balance < new_offer:
         await query.answer("Saldo insufficiente per fare questa offerta.")
         return
 
@@ -137,8 +140,6 @@ async def set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if len(context.args) < 2:
         await update.message.reply_text("Utilizzo: /portafogli @utente [importo]")
         return
-
-    user_id, username = get_tagged_user(update)
     
     try:
         amount = int(context.args[-1])
@@ -146,7 +147,7 @@ async def set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("L'importo deve essere un numero intero.")
         return
 
-    # Salva il bilancio usando l'ID utente
+    user_id, username = get_tagged_user(update)
     AuctionDB.set_user_balance(user_id, amount)
     await update.message.reply_text(f"{username} ora ha {amount}₽")
 
@@ -158,17 +159,18 @@ def get_tagged_user(update: Update):
             if entity.type == "text_mention":
                 return entity.user.id, entity.user.username 
             if entity.type == "mention":
-                w = UsernameToChatAPI("https://localhost:1234/", "RationalGymsGripOverseas", application.bot)
+                pass
+                # w = UsernameToChatAPI("https://localhost:1234/", "RationalGymsGripOverseas", application.bot)
 
 
 
-class CustomContext(CallbackContext):
-    @property
-    def wrapper(self) -> UsernameToChatAPI:
-        return self.bot_data["wrapper"]
+# class CustomContext(CallbackContext):
+#     @property
+#     def wrapper(self) -> UsernameToChatAPI:
+#         return self.bot_data["wrapper"]
 
-    async def resolve_username(self, username: str) -> Chat:
-        return await self.wrapper.resolve(username)
+#     async def resolve_username(self, username: str) -> Chat:
+#         return await self.wrapper.resolve(username)
 
 
 
@@ -205,7 +207,7 @@ async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Per favore, inserisci un importo valido.")
         return
 
-    keyboard = [[InlineKeyboardButton(f"₽ {amount} ₽", callback_data=f"gift_{amount}")]]
+    keyboard = [[InlineKeyboardButton(f"{amount}{Valuta.Pokédollari.value}", callback_data=f"gift_{amount}")]]
 
     await context.bot.send_message(
         chat_id=GROUP_ID, 
@@ -221,55 +223,51 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     wallet = AuctionDB.add_to_wallet(user_id, amount)
     p = Valuta.Pokédollari.value
 
-    if wallet:
-        logging.getLogger().warning(f"{query.from_user.name} ha ricevuto {amount}{p}, ne ha {wallet}{p}")
-        await query.answer(f"Hai ricevuto {amount}{p}! Ora ne hai {wallet}")
+    logging.getLogger().warning(f"{query.from_user.name} ha riscattato {amount}{p}, ne ha {wallet}{p}")
+    await query.answer(f"Hai ricevuto {amount}{p}! Ora ne hai {wallet}")
+
+
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Risponde con tutte le informazioni del messaggio inviato."""
+
+    # Ottieni l'intero messaggio come dizionario
+    message_dict = update.message.to_dict()
+    
+    # Stampa in console per debug
+    print("Messaggio ricevuto (dizionario completo):")
+    print(json.dumps(message_dict, indent=2, ensure_ascii=False))
+    
+    if context.args:
+        argument = context.args[0]
+        info_text = f"Hai passato come argomento: {argument}\n"
     else:
-        await query.answer("Errore nel ricevere le monete.")
+        info_text = "Non è stato passato alcun argomento.\n"
+    message = update.message
 
+    info_text = (
+        f"ID utente: {message.from_user.id}\n"
+        f"Nome utente: @{message.from_user.username}\n"
+        f"Nome completo: {message.from_user.full_name}\n"
+        f"ID chat: {message.chat.id}\n"
+        f"Tipo chat: {message.chat.type}\n"
+        f"Testo del messaggio: {message.text}\n"
+        f"ID messaggio: {message.message_id}\n"
+        f"Data del messaggio: {message.date}\n"
+    )
 
+    # Informazioni aggiuntive, se presenti
+    if message.reply_to_message:
+        info_text += f"Risposta al messaggio ID: {message.reply_to_message.message_id}\n"
+    if message.photo:
+        info_text += f"ID della foto: {message.photo[-1].file_id}\n"
+    if message.caption:
+        info_text += f"Didascalia: {message.caption}\n"
+    if message.location:
+        info_text += f"Posizione: ({message.location.latitude}, {message.location.longitude})\n"
+    if message.document:
+        info_text += f"ID documento: {message.document.file_id}\n"
 
-# async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-#     """Risponde con tutte le informazioni del messaggio inviato."""
-
-#     # Ottieni l'intero messaggio come dizionario
-#     message_dict = update.message.to_dict()
-    
-#     # Stampa in console per debug
-#     print("Messaggio ricevuto (dizionario completo):")
-#     print(json.dumps(message_dict, indent=2, ensure_ascii=False))
-    
-#     if context.args:
-#         argument = context.args[0]
-#         info_text = f"Hai passato come argomento: {argument}\n"
-#     else:
-#         info_text = "Non è stato passato alcun argomento.\n"
-#     message = update.message
-
-#     info_text = (
-#         f"ID utente: {message.from_user.id}\n"
-#         f"Nome utente: @{message.from_user.username}\n"
-#         f"Nome completo: {message.from_user.full_name}\n"
-#         f"ID chat: {message.chat.id}\n"
-#         f"Tipo chat: {message.chat.type}\n"
-#         f"Testo del messaggio: {message.text}\n"
-#         f"ID messaggio: {message.message_id}\n"
-#         f"Data del messaggio: {message.date}\n"
-#     )
-
-#     # Informazioni aggiuntive, se presenti
-#     if message.reply_to_message:
-#         info_text += f"Risposta al messaggio ID: {message.reply_to_message.message_id}\n"
-#     if message.photo:
-#         info_text += f"ID della foto: {message.photo[-1].file_id}\n"
-#     if message.caption:
-#         info_text += f"Didascalia: {message.caption}\n"
-#     if message.location:
-#         info_text += f"Posizione: ({message.location.latitude}, {message.location.longitude})\n"
-#     if message.document:
-#         info_text += f"ID documento: {message.document.file_id}\n"
-
-#     await message.reply_text(info_text)
+    await message.reply_text(info_text)
 
 
 
@@ -305,7 +303,7 @@ def main() -> None:
 
     application.add_handler(CallbackQueryHandler(button, pattern="^gift_"))
     application.add_handler(CallbackQueryHandler(handle_offer, pattern="^offer_"))
-    # application.add_handler(CommandHandler("info", info))
+    application.add_handler(CommandHandler("info", info))
     application.add_handler(MessageHandler(filters.PHOTO & filters.User(AUTHORIZED_USERS), handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & filters.User(AUTHORIZED_USERS), handle_card_names))
 
