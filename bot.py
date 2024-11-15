@@ -1,8 +1,7 @@
 import logging
-import sqlite3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Chat
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext
-from datetime import datetime, timedelta
+from datetime import timedelta
 from auction import AuctionDB, Valuta
 from functools import wraps
 from telegram import Update
@@ -20,71 +19,21 @@ def authorized_only(func):
         return await func(update, context, *args, **kwargs)
     return wrapper
 
-# Timeout per l'asta (30 minuti)
-AUCTION_TIMEOUT = timedelta(minutes=30)
-EMOJIS = ["🔥", "💧", "🌲"]
 user_state = {}
+
 
 
 @authorized_only
 async def start_auction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logging.getLogger().log(logging.WARNING, context._chat_id)
-    user_id = update.message.from_user.id
-    user_state[user_id] = {
-            "state": "awaiting_photo",
-            "photos": [],
-            "card_names": []
-        }
-    await update.message.reply_text("Inviami la foto delle carte per l'asta.")
-
-
-
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Gestisce la ricezione delle foto per l'asta."""
-    user_id = update.message.from_user.id
-    if user_id not in user_state:
-        return
-
-    # Memorizza la foto
     photo = update.message.photo[-1].file_id
-    user_state[user_id]["photo"] = photo
+    caption = update.message.caption
 
-    try:
-        card_names = update.message.caption.splitlines()
-        if len(card_names) == 3:
-            user_state[user_id]["card_names"] = card_names
-            await finalize_auction(context, user_id)
-            return
-    finally:
-        # Passa alla fase successiva
-        user_state[user_id]["state"] = "awaiting_names"
-        await update.message.reply_text("Ora inviami i nomi delle tre carte, andando a caporigo.")
-
-
-
-async def handle_card_names(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Gestisce la ricezione dei nomi delle carte."""
-    user_id = update.message.from_user.id
-    if user_id not in user_state or user_state[user_id]["state"] != "awaiting_names":
-        return
-
-    card_names = update.message.text.splitlines()
-    if len(card_names) == 3:
-        user_state[user_id]["state"] = "done"
-        user_state[user_id]["card_names"] = card_names
-        await finalize_auction(context, user_id)
-    else:
-        await update.message.reply_text("Errore: invia esattamente tre nomi di carte separati da newlines.")
-
-
-
-async def finalize_auction(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
-    """Crea le aste nel database e invia il messaggio di asta nel gruppo."""
-    card_names = user_state[user_id]["card_names"]
+    if not caption or len(caption.splitlines()) != 3:
+        return 
     
-    message_text, keyboard = bid_message_builder([(card_name,0) for card_name in card_names])
+    card_names = update.message.caption.splitlines()
+    message_text, keyboard = bid_message_builder([(None, card_name,0,None) for card_name in card_names])
     
-    photo = user_state[user_id]["photo"]
     reply_markup = InlineKeyboardMarkup([keyboard])
     message = await context.bot.send_photo(
         chat_id=GROUP_ID, 
@@ -94,18 +43,21 @@ async def finalize_auction(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> 
     
     for card_name in card_names:
         AuctionDB.add_active_auction(card_name, message.message_id)
-    
-    # Cancella lo stato temporaneo dell'utente
-    del user_state[user_id]
+
 
 
 def bid_message_builder(auctions:list[3]):
-    message_text = "#Asta iniziata! Scegli una carta per fare un'offerta:\n"
+    EMOJIS = ["🔥", "💧", "🌲"]
+    message_text = "#Asta iniziata!\n"
     keyboard = []
     for i, auction in enumerate(auctions):
-        _, card_name, last_bid = auction
-        message_text += f"{EMOJIS[i]} → {card_name}: {last_bid}\n"
-        keyboard.append(InlineKeyboardButton(f'{EMOJIS[i]}', callback_data=f"offer_{card_name}"))
+        _, card_name, last_bid, last_bidder = auction
+        username = AuctionDB.name_of_user(last_bidder) if last_bidder else None
+        message_text += f"{EMOJIS[i]} → {card_name}: {last_bid}" + (f" da {username}" if username else "") + "\n"
+
+        keyboard.append(InlineKeyboardButton(f'+{EMOJIS[i]}', callback_data=f"offer_{card_name}"))
+    
+    message_text += "Premi sotto per fare un'offerta"
     return message_text,keyboard
 
 async def handle_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -116,16 +68,18 @@ async def handle_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Recupera l'asta attiva per la carta specifica e il message_id
     auction = AuctionDB.get_auction_by_card_name(card_name)
     if not auction:
-        await query.answer("L'asta per questa carta è già terminata.")
+        await query.answer("Asta terminata!")
         return
 
     auction_id, last_bid = auction
     new_offer = last_bid + 1
+    username = (user.username or user.full_name)
+
 
     # Verifica e aggiorna il saldo dell'utente
     balance = AuctionDB.get_user_balance(user.id)
     if balance is None:
-        AuctionDB.add_to_wallet(user.id, user.username, 0)
+        AuctionDB.add_to_wallet(user.id, username, 0)
     if balance < new_offer:
         await query.answer("Saldo insufficiente per fare questa offerta.")
         return
@@ -136,8 +90,10 @@ async def handle_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     active_auctions = AuctionDB.get_active_auctions(message_id=query.message.message_id)
     message_text, keyboard = bid_message_builder(active_auctions)
     reply_markup = InlineKeyboardMarkup([keyboard])
-    await query.edit_message_caption(caption=message_text, reply_markup=reply_markup)
-
+    try:
+        await query.edit_message_caption(caption=message_text, reply_markup=reply_markup)
+    except TimeoutError as e:
+        logging.getLogger().error(f"TimedOut error @auction {auction_id} from {username}: {e}")
 
 @authorized_only
 async def set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -153,14 +109,14 @@ async def set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     user_id, username = get_tagged_user(update)
     AuctionDB.set_user_balance(user_id, amount)
-    await update.message.reply_text(f"{username} ora ha {amount}₽")
+    logging.getLogger().warning(f"{user_id}:{username} ora ha {amount}₽")
+    await update.message.set_reaction(reaction="👍")
 
 
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Risponde all'utente con il saldo corrente delle sue monete."""
     user_id = update.message.from_user.id
-    username = update.message.from_user.username
-    
+    username = (update.message.from_user.username or update.message.from_user.full_name)
     balance = AuctionDB.get_user_balance(user_id)
     
     # Se il bilancio è None, significa che l'utente non ha un portafoglio, quindi crealo con saldo 0
@@ -171,17 +127,22 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(f"Hai attualmente {balance}{Valuta.Pokédollari.value} nel tuo portafoglio.")
 
 
-
-
 def get_tagged_user(update: Update):
     if update.message.entities:
         for entity in update.message.entities:
             if entity.type == "text_mention":
-                return entity.user.id, entity.user.username 
+                return entity.user.id, entity.user.full_name
             if entity.type == "mention":
-                pass
-                # w = UsernameToChatAPI("https://localhost:1234/", "RationalGymsGripOverseas", application.bot)
+                username = update.message.text.split("@")[1].split(" ")[0]
+                return AuctionDB.id_of_user(username), username
 
+def auction_results_builder(auctions):
+    results = []
+    for auction in auctions:
+        auction_id, _, _, _ = auction
+        result = AuctionDB.end_auction(auction_id)
+        results.append(result)
+    return "\n".join(results) if results else "Sembra che quest'asta fosse già chiusa, o non era proprio un'asta boh."
 
 @authorized_only
 async def end_auction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -191,56 +152,61 @@ async def end_auction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     auctions = AuctionDB.get_active_auctions(update.message.reply_to_message.id)
-
-    # Chiudi l'asta e determina il vincitore
-    for auction in auctions:
-        auction_id, _, _ = auction
-        result = AuctionDB.end_auction(auction_id)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
+    results_message = auction_results_builder(auctions)
+    await update.message.reply_to_message.reply_text(results_message)
 
 
 @authorized_only
 async def end_all_auctions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     auctions = AuctionDB.get_active_auctions()
-
-    # Chiudi l'asta e determina il vincitore
-    for auction in auctions:
-        auction_id, _, _ = auction
-        result = AuctionDB.end_auction(auction_id)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
-
-
+    results_message = auction_results_builder(auctions)
+    await context.bot.send_message(chat_id=GROUP_ID, text=results_message)
 
 @authorized_only
 async def gift(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) != 1 or not context.args[0].isdigit():
         await update.message.reply_text("Utilizzo: /gift [amount]")
         return
-    
+
     try:
         amount = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("Per favore, inserisci un importo valido.")
+        await update.message.reply_text("Inserisci un importo valido.")
         return
 
     keyboard = [[InlineKeyboardButton(f"{amount}{Valuta.Pokédollari.value}", callback_data=f"gift_{amount}")]]
-
-    await context.bot.send_message(
+    sent_message = await context.bot.send_message(
         chat_id=GROUP_ID, 
         text="Clicca qui sotto per ricevere un regalino.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+    # Salva il message_id del gift
+    gift_id = sent_message.message_id
+    AuctionDB.add_gift(gift_id)
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    user_id = query.from_user.id  
+    user_id = query.from_user.id
+    gift_id = query.message.message_id  # Ottiene l'ID del messaggio del gift
     amount = int(query.data.split('_')[1])
-
-    wallet = AuctionDB.add_to_wallet(user_id, amount, username=query.from_user.username)
     p = Valuta.Pokédollari.value
 
-    logging.getLogger().warning(f"{query.from_user.name} ha riscattato {amount}{p}, ne ha {wallet}{p}")
-    await query.answer(f"Hai ricevuto {amount}{p}! Ora ne hai {wallet}")
+    # Verifica se l'utente ha già riscattato il gift
+    if not AuctionDB.claim_gift(gift_id, user_id):
+        logging.getLogger().warning(f"{query.from_user.full_name} ha provato a riscattare nuovamente {amount}{p}.")
+        await query.answer("Hai già riscosso questo regalo.")
+        return
+
+    # Se non ha ancora riscosso, aggiungi l'importo
+    username = (query.from_user.username or query.from_user.full_name)
+    wallet = AuctionDB.add_to_wallet(user_id, username, amount)
+
+    logging.getLogger().warning(f"{query.from_user.full_name} ha riscattato {amount}{p}, ne ha {wallet}")
+    try:
+        await query.answer(f"Hai ricevuto {amount}{p}! \nOra ne hai {wallet}.")
+    except TimeoutError as e:
+        logging.getLogger().error("Timedout")
 
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -296,7 +262,7 @@ import json
 def read_json():
     with open('token.json') as f:
         data = json.load(f)
-    return data['bot_token'], data['prova'], list(data['authorized'].values())
+    return data['bot_token'], data['mana_vault'], list(data['authorized'].values())
 
 
 
@@ -310,11 +276,11 @@ def main() -> None:
     logging.info("Bot avviato")
 
     AuctionDB.initialize_db()
-    application = Application.builder().token(TOKEN).build()
+    application = Application.builder().token(TOKEN).concurrent_updates(5).build()
 
-    application.add_handler(CommandHandler("asta", start_auction))
     application.add_handler(CommandHandler("deposito", set_wallet))
-    application.add_handler(CommandHandler("termina", end_auction_handler))    
+    application.add_handler(CommandHandler("termina", end_auction_handler))  
+    application.add_handler(CommandHandler("terminatutte", end_all_auctions))  
     application.add_handler(CommandHandler("gift", gift))
     application.add_handler(CommandHandler("saldo", check_balance))
 
@@ -322,8 +288,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(button, pattern="^gift_"))
     application.add_handler(CallbackQueryHandler(handle_offer, pattern="^offer_"))
     application.add_handler(CommandHandler("info", info))
-    application.add_handler(MessageHandler(filters.PHOTO & filters.User(AUTHORIZED_USERS), handle_photo))
-    application.add_handler(MessageHandler(filters.TEXT & filters.User(AUTHORIZED_USERS), handle_card_names))
+    application.add_handler(MessageHandler(filters.PHOTO & filters.User(AUTHORIZED_USERS), start_auction))
 
     application.add_error_handler(error_handler)
 

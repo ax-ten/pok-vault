@@ -34,8 +34,15 @@ class AuctionDB:
         
         cursor.execute('''CREATE TABLE IF NOT EXISTS users (
                             user_id      INTEGER PRIMARY KEY,
-                            user_name  TEXT,
-                            wallet INTEGER)''')
+                            user_name    TEXT,
+                            wallet       INTEGER)''')
+        
+
+        cursor.execute('''CREATE TABLE IF NOT EXISTS gift_claims (
+                            gift_id       INTEGER,
+                            user_id       INTEGER,
+                            UNIQUE(gift_id, user_id) ON CONFLICT IGNORE)''')
+    
 
         conn.commit()
         conn.close()
@@ -62,6 +69,7 @@ class AuctionDB:
         conn.commit()
         conn.close()
 
+
     @staticmethod
     def end_auction(auction_id: int) -> str:
         """Termina l'asta specificata e determina il vincitore, se presente."""
@@ -84,15 +92,15 @@ class AuctionDB:
             AuctionDB.archive_auction(auction_id)  # Archivia l'asta prima di eliminarla
         else:
             # Determina il vincitore
-            winner = user_id
-            result = f"L'asta per {card_name} è terminata. Il vincitore è l'utente con ID {winner} con un'offerta di {last_bid} {Valuta.Pokédollari.value}."
+            winner = AuctionDB.name_of_user(user_id)
+            result = f"{winner} si è aggiudicatə {card_name} per {last_bid}{Valuta.Pokédollari.value}!"
 
             # Archivia l'asta e aggiorna il campo `paid` in `archived_auctions`
             AuctionDB.archive_auction(auction_id)
             cursor.execute("UPDATE archived_auctions SET paid = ? WHERE id = ?", (last_bid, auction_id))
 
-            # Aggiorna il saldo del vincitore
-            cursor.execute("UPDATE wallets SET balance = balance - ? WHERE user_id = ?", (last_bid, winner))
+            # Aggiorna il saldo dell'utente vincitore nella tabella users
+            cursor.execute("UPDATE users SET wallet = wallet - ? WHERE user_id = ?", (last_bid, user_id))
 
         conn.commit()
         conn.close()
@@ -111,7 +119,6 @@ class AuctionDB:
         cursor.execute("DELETE FROM active_auctions WHERE id = ?", (auction_id,))
         conn.commit()
         conn.close()
-    
 
     @staticmethod
     def get_active_auctions(message_id=None):
@@ -120,14 +127,14 @@ class AuctionDB:
         
         if message_id is not None:
             auctions = cursor.execute("""
-                SELECT id, card_name, last_bid 
+                SELECT id, card_name, last_bid, user_id 
                 FROM active_auctions 
                 WHERE message_id = ?
                 """,(message_id,)
             ).fetchall()
         else:
             auctions = cursor.execute("""
-                SELECT id, card_name, last_bid 
+                SELECT id, card_name, last_bid , user_id 
                 FROM active_auctions
                 """).fetchall()
         conn.close()
@@ -145,6 +152,32 @@ class AuctionDB:
         auction = cursor.fetchone() 
         conn.close()
         return auction if auction else None
+    
+    
+    @staticmethod
+    def name_of_user(id):
+        conn = sqlite3.connect(AuctionDB.DB_PATH)
+        cursor = conn.cursor()
+        user_name = cursor.execute(
+            "SELECT user_name FROM users WHERE user_id = ?",
+            (id,)
+        ).fetchone()
+        conn.commit()
+        conn.close()
+        return user_name[0]
+
+    
+    @staticmethod
+    def id_of_user(username):
+        conn = sqlite3.connect(AuctionDB.DB_PATH)
+        cursor = conn.cursor()
+        user_id = cursor.execute(
+            "SELECT user_id FROM users WHERE user_name = ?",
+            (username,)
+        ).fetchone()
+        conn.commit()
+        conn.close()
+        return user_id[0]
 
     @staticmethod
     def get_user_balance(user_id):
@@ -157,30 +190,48 @@ class AuctionDB:
         conn.close()
         return row[0] if row else None
 
+
     @staticmethod
-    def update_user_balance(user_id, amount):
+    def set_user_balance(user_id, amount):
         conn = sqlite3.connect(AuctionDB.DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET wallet = ? WHERE user_id = ?", 
+        conn.cursor().execute(
+            "UPDATE users SET wallet = ? WHERE user_id = ?",
             (amount, user_id)
         )
+
         conn.commit()
         conn.close()
 
     @staticmethod
-    def set_user_balance(user_id, user_name, amount):
+    def add_gift(gift_id):
         conn = sqlite3.connect(AuctionDB.DB_PATH)
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO users (user_id, user_name, wallet, last_bid_id) VALUES (?, ?, ?, ?)",
-            (user_id, user_name, amount, None)
-        )
+        cursor.execute("INSERT OR IGNORE INTO gift_claims (gift_id) VALUES (?)", (gift_id,))
         conn.commit()
         conn.close()
 
+    # Funzione per riscattare il gift
     @staticmethod
-    def add_to_wallet(user_id: str, amount: int, username: str) -> int:
+    def claim_gift(gift_id, user_id):
+        conn = sqlite3.connect(AuctionDB.DB_PATH)
+        cursor = conn.cursor()
+
+        # Controlla se l'utente ha già riscosso il gift
+        cursor.execute("SELECT 1 FROM gift_claims WHERE gift_id = ? AND user_id = ?", (gift_id, user_id))
+        already_claimed = cursor.fetchone()
+
+        if already_claimed:
+            conn.close()
+            return False  # Già riscosso
+
+        # Altrimenti, registra la riscossione
+        cursor.execute("INSERT INTO gift_claims (gift_id, user_id) VALUES (?, ?)", (gift_id, user_id))
+        conn.commit()
+        conn.close()
+        return True  # Riscossione riuscita
+
+    @staticmethod
+    def add_to_wallet(user_id: str, username: str, amount: int) -> int:
         conn = sqlite3.connect(AuctionDB.DB_PATH)
         cursor = conn.cursor()
         wallet = cursor.execute(
@@ -193,11 +244,12 @@ class AuctionDB:
                 "INSERT INTO users (user_id, user_name, wallet) VALUES (?, ?, ?)", 
                 (user_id, username, amount)
             )
-
-        # da de-commentare se si vogliono fare gift reali, ma bisogna fare in modo che siano applicabili solo una volta
         else:
             amount = wallet[0] + amount
-            cursor.execute("UPDATE users SET wallet = ? WHERE user_id = ?", (amount, user_id))
+            cursor.execute(
+                "UPDATE users SET wallet = ? WHERE user_id = ?", 
+                (amount, user_id)
+            )
         
         conn.commit()
         conn.close()
