@@ -1,7 +1,6 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Chat
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, CallbackContext
-from datetime import timedelta
 from auction import AuctionDB, Valuta
 from functools import wraps
 from telegram import Update
@@ -125,6 +124,18 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         balance = 0
     
     await update.message.reply_text(f"Hai attualmente {balance}{Valuta.Pokédollari.value} nel tuo portafoglio.")
+
+
+
+@authorized_only
+async def saldo_totale_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Recupera tutti i saldi degli utenti
+    users_balances = AuctionDB.get_all_balances()
+
+    # Costruisce il messaggio con username e saldo
+    message = "\n".join(f"{balance}{Valuta.Pokédollari.value} : {username}" for username, balance in users_balances)
+    
+    await update.message.reply_text(message)
 
 
 def get_tagged_user(update: Update):
@@ -283,6 +294,7 @@ def main() -> None:
     application.add_handler(CommandHandler("terminatutte", end_all_auctions))  
     application.add_handler(CommandHandler("gift", gift))
     application.add_handler(CommandHandler("saldo", check_balance))
+    application.add_handler(CommandHandler("saldototale", saldo_totale_handler))
 
 
     application.add_handler(CallbackQueryHandler(button, pattern="^gift_"))

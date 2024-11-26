@@ -229,6 +229,17 @@ class AuctionDB:
         conn.commit()
         conn.close()
         return True  # Riscossione riuscita
+    
+
+    @staticmethod
+    def get_all_balances():
+        conn = sqlite3.connect(AuctionDB.DB_PATH)
+        cursor = conn.cursor()
+        rows = cursor.execute(
+            "SELECT user_name, wallet FROM users"
+        ).fetchall()
+        conn.close()
+        return rows
 
     @staticmethod
     def add_to_wallet(user_id: str, username: str, amount: int) -> int:
