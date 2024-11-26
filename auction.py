@@ -42,6 +42,12 @@ class AuctionDB:
                             gift_id       INTEGER,
                             user_id       INTEGER,
                             UNIQUE(gift_id, user_id) ON CONFLICT IGNORE)''')
+        
+        cursor.execute('''CREATE TABLE IF NOT EXISTS medals (
+                            user_id TEXT,
+                            emoji TEXT,
+                            name TEXT,
+                            PRIMARY KEY (user_id, emoji, name));''')
     
 
         conn.commit()
@@ -68,6 +74,42 @@ class AuctionDB:
         )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def add_medal(user_id: str, emoji: str, name: str) -> None:
+        conn = sqlite3.connect(AuctionDB.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO medals (user_id, emoji, name) VALUES (?, ?, ?)", 
+            (user_id, emoji, name)
+        )
+        conn.commit()
+        conn.close()
+    
+    @staticmethod
+    def get_user_medals(user_id: str) -> list[tuple]:
+        conn = sqlite3.connect(AuctionDB.DB_PATH)
+        cursor = conn.cursor()
+        medals = cursor.execute(
+            "SELECT emoji, name FROM medals WHERE user_id = ?", 
+            (user_id,)
+        ).fetchall()
+        conn.close()
+        return medals
+    
+    @staticmethod
+    def get_all_medals() -> list[tuple]:
+        conn = sqlite3.connect(AuctionDB.DB_PATH)
+        cursor = conn.cursor()
+        summary = cursor.execute("""
+            SELECT u.user_name, COUNT(m.emoji), GROUP_CONCAT(m.emoji, ' ') 
+            FROM medals m
+            JOIN users u ON m.user_id = u.user_id
+            GROUP BY u.user_name
+        """).fetchall()
+        conn.close()
+        return summary
+
 
 
     @staticmethod

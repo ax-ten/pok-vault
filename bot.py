@@ -180,6 +180,72 @@ def auction_results_builder(auctions):
         results.append(result)
     return "\n".join(results) if results else "Sembra che quest'asta fosse già chiusa, o non era proprio un'asta boh."
 
+
+@authorized_only
+async def add_medal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 3:
+        await update.message.reply_text("Utilizzo: /medaglia @username [emoji] [nome della medaglia]")
+        return
+
+    # Ottieni dettagli dell'utente taggato
+    user_id, username = get_tagged_user(update)
+    if user_id is None or username is None:
+        await update.message.reply_text("Non riesco a trovare l'utente specificato. Assicurati di aver taggato correttamente.")
+        return
+
+    emoji = context.args[1]
+    medal_name = " ".join(context.args[2:])
+
+    # Aggiungi la medaglia nel database
+    AuctionDB.add_medal(user_id, emoji, medal_name)
+
+    # Messaggio pomposo
+    message_text = (
+        f"🌟 **Congratulazioni, {username}!** 🌟\n\n"
+        f"Hai ricevuto la medaglia *{medal_name} {emoji}* :\n\n"
+        f"Continua così, e la Lega Pokémon sarà tua! 🏆"
+    )
+
+    # Invia la GIF e il messaggio
+    with open("vittoria.gif", "rb") as gif_file:
+        await context.bot.send_animation(
+            chat_id=update.effective_chat.id,
+            animation=gif_file,
+            caption=message_text,
+            parse_mode="Markdown",
+        )
+
+@authorized_only
+async def medals_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.args:  
+        # Ottieni dettagli dell'utente taggato
+        user_id, username = get_tagged_user(update)
+        if user_id is None or username is None:
+            await update.message.reply_text("Non riesco a trovare l'utente specificato. Assicurati di aver taggato correttamente.")
+            return
+
+        medals = AuctionDB.get_user_medals(user_id)
+        if not medals:
+            await update.message.reply_text(f"{username} non ha medaglie.")
+            return
+
+        message = f"Medaglie di {username}:\n"
+        message += "\n".join(f"{emoji} - {name}" for emoji, name in medals)
+        await update.message.reply_text(message)
+
+    else:  
+        medals_summary = AuctionDB.get_all_medals()
+
+        # Mostra il riepilogo delle medaglie
+        message = "Medaglie ufficialmente attribuite dalla Lega Pokémon\n"
+        for username, medal_count, emojis in medals_summary:
+            message += f"{username}: {medal_count} {emojis}\n"
+
+        await update.message.reply_text(message)
+
+
+
+
 @authorized_only
 async def end_auction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Controlla se il comando è una risposta a un messaggio di apertura dell'asta
@@ -320,6 +386,8 @@ def main() -> None:
     application.add_handler(CommandHandler("gift", gift))
     application.add_handler(CommandHandler("give", give_handler))
     application.add_handler(CommandHandler("saldo", check_balance))
+    application.add_handler(CommandHandler("medaglia", add_medal_handler))
+    application.add_handler(CommandHandler("medaglie", medals_handler))
     application.add_handler(CommandHandler("saldototale", saldo_totale_handler))
 
 
