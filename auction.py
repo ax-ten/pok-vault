@@ -251,17 +251,20 @@ class AuctionDB:
         ).fetchone()
 
         if not wallet:
+            # Inserisce un nuovo record per il nuovo utente
             cursor.execute(
                 "INSERT INTO users (user_id, user_name, wallet) VALUES (?, ?, ?)", 
                 (user_id, username, amount)
             )
+            new_balance = amount
         else:
-            amount = wallet[0] + amount
+            # Aggiorna il portafoglio esistente
+            new_balance = wallet[0] + amount
             cursor.execute(
                 "UPDATE users SET wallet = ? WHERE user_id = ?", 
-                (amount, user_id)
+                (new_balance, user_id)
             )
         
         conn.commit()
         conn.close()
-        return amount
+        return new_balance
