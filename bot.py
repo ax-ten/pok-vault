@@ -140,36 +140,6 @@ async def saldo_totale_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(message)
 
 
-@authorized_only
-async def give_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Controlla i parametri del comando
-    if len(context.args) < 2:
-        await update.message.reply_text("Utilizzo: /give @username [amount]")
-        return
-
-    # Prova a estrarre l'importo
-    try:
-        amount = int(context.args[-1])
-    except ValueError:
-        await update.message.reply_text("L'importo deve essere un numero intero.")
-        return
-
-    # Ottieni i dettagli dell'utente taggato
-    user_id, username = get_tagged_user(update)
-    if user_id is None or username is None:
-        await update.message.reply_text("Non riesco a trovare l'utente specificato. Assicurati di aver taggato correttamente.")
-        return
-
-    # Aggiungi l'importo al portafoglio dell'utente
-    new_balance = AuctionDB.add_to_wallet(user_id, username, amount)
-    logging.getLogger().info(f"{username} ha ricevuto {amount}₽, nuovo saldo: {new_balance}₽")
-
-    # Conferma con una reazione
-    await update.message.add_reaction("👍")
-
-    # Messaggio di conferma
-    await update.message.reply_text(f"{username} ha ricevuto {amount}₽! Ora ha {new_balance}₽.")
-
 
 @authorized_only
 async def give_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -191,7 +161,7 @@ async def give_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     new_balance = AuctionDB.add_to_wallet(user_id, username, amount)
     logging.getLogger().info(f"{username} ha ricevuto {amount}₽, nuovo saldo: {new_balance}₽")
 
-    await update.message.add_reaction("👍")
+    await update.message.set_reaction("👍")
 
 def get_tagged_user(update: Update):
     if update.message.entities:
